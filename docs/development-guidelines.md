@@ -26,7 +26,8 @@ task-app/
 │     ├─ store.js                永続化
 │     ├─ tasks.js                ドメインロジック（純粋関数）
 │     └─ dates.js                日付ユーティリティ（純粋関数）
-└─ tests/                        node:test のテスト
+├─ tests/                        node:test のテスト
+└─ android/                      Android 版（Android Studio のプロジェクト。8 章）
 ```
 
 ## 3. コーディング規約
@@ -64,3 +65,27 @@ npm test
 
 - 保存形式を変えるときは `version` を上げ、`store.js` に旧バージョンからの移行処理を追加する。
 - 同時に `docs/functional-design.md` のデータモデルを更新する。
+- Android 版も同じ形式を使うので、Android 側の `data` にも同じ移行処理を入れる。
+
+## 8. Android 版
+
+### 8.1 技術方針
+
+- **Kotlin ＋ Jetpack Compose**。開発は Windows の Android Studio で行う。
+- 使ってよいライブラリは AndroidX（Compose・Activity など）と Kotlin 標準（`kotlinx.serialization` を含む）まで。それ以外の外部ライブラリは使わない。
+- minSdk 28（Android 9）、targetSdk は最新の安定版。
+- 配布は APK の直接インストール。Play ストアには出さない。
+
+### 8.2 コーディング規約
+
+- Kotlin 公式のコーディング規約に従う（インデント 4 スペース）。
+- `domain` パッケージは Android API・ファイル・現在時刻に依存しない。「いま」は引数で受け取る。
+- state は `data class` の不変データとし、更新関数は新しいオブジェクトを返す（`copy`）。
+- `DevicePolicyManager` を呼ぶのは `lock` パッケージだけにする。
+- UI 文言・デザインのルールは 4・5 章と同じ（タップ領域 56dp 以上、文字 20sp 以上、端末の「アニメーションを削除」設定を尊重）。
+
+### 8.3 テスト
+
+- `domain` は JUnit の単体テストを必ず書く。**Web 版の `tests/` と同じテストケースを移植**し、2つの実装のふるまいがずれないようにする。Web 版にケースを足したら Android 版にも足す。
+- `isLocked` / `nextLockChange` は、しめきり・ねるじゅんび開始・夜中0時・一時かいほうの終わりの前後1分を境界値テストする。
+- 端末の所有者まわり（F-27〜F-31）は自動テストしにくいので、エミュレーターで `adb shell dpm set-device-owner` を実行して手動確認する。確認項目は `android/README.md` にチェックリストとして置く。

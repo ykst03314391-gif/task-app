@@ -150,3 +150,83 @@ URL スキームとファイルでやりとりする。Web アプリから iOS �
 | localStorage が使えない（プライベートモード等） | メモリ上で動作を継続し、画面上部に「データがほぞんできません」と表示 |
 | 保存データが壊れている | 初期状態で起動し、壊れたデータは `kids-task-app/v1.broken` に退避 |
 | フォーム入力エラー | フォーム内にひらがなのメッセージを表示し、保存しない |
+
+## 7. Android 版（F-27〜F-32）
+
+Web 版と同じ画面・同じルールを Kotlin で実装し、そのうえに「端末の所有者」としての制限機能を足す。
+外部通信はしない（Web 版と同じ）。
+
+### 7.1 構成
+
+```
+android/app/src/main/java/<パッケージ>/
+ ├─ ui/              Jetpack Compose の画面（きょう・やること・きろく・せってい）
+ ├─ domain/          ドメインロジック（純粋関数。Web 版の tasks.js / dates.js と同じ仕様）
+ ├─ data/            JSON ファイルへの保存・読み込み・データ検証（Web 版の store.js に相当）
+ └─ lock/
+     ├─ AdminReceiver.kt     DeviceAdminReceiver（端末の所有者の入口）
+     ├─ LockController.kt    カギの状態に合わせて制限アプリを止める・戻す
+     ├─ LockScheduler.kt     次にカギの状態が変わる時刻にアラームを予約する
+     ├─ LockEventReceiver.kt 起動完了・アラーム・時刻変更を受けて LockController を呼ぶ
+     └─ Hardening.kt         ぬけみち防止の制限（F-31）をかける
+```
+
+- 依存関係は一方向: `ui → data → domain`、`lock → data → domain`。`domain` は Android API に依存せず、JVM の単体テストで動かす。
+- 「いま」は `domain` の外で取り、引数で渡す（Web 版と同じ方針）。
+
+### 7.2 カギの判定と制限の流れ
+
+カギがかかっているかどうか（F-12・F-24・F-25・F-18）は `domain` の純粋関数で決める。
+
+| 関数 | 説明 |
+|---|---|
+| `isLocked(state, now)` | いまカギがかかっているか。保護者の一時かいほう（F-32）中は false |
+| `nextLockChange(state, now)` | 次にカギの状態が変わりうる時刻（次のしめきり・ねるじゅんび開始・一時かいほうの終わり・夜中0時のうち最も早いもの） |
+
+```
+[できたチェック・設定変更・アラーム・起動完了・時刻変更]
+     ▼
+LockController.apply()
+     locked = isLocked(state, now)
+     DevicePolicyManager.setPackagesSuspended(制限アプリ, locked)   ← F-27
+     LockScheduler.schedule(nextLockChange(state, now))              ← F-28
+```
+
+- 一時停止には `setPackagesSuspended` を使う。止めたアプリはホーム画面でグレーになり、開こうとすると OS のダイアログが出る。使っている途中で止めたアプリは閉じられる。
+- `apply()` は何度呼んでも同じ結果になるようにする（冪等）。状態が変わるたびに、制限アプリ全体に対して止める・戻すを指定しなおす。
+- アラームは `AlarmManager.setExactAndAllowWhileIdle` で予約する。端末がスリープ中でもしめきりの時刻にカギがかかる。
+- 再起動（`BOOT_COMPLETED`）、時刻・タイムゾーン変更（`TIME_SET` / `TIMEZONE_CHANGED`）でも `apply()` を呼ぶ。
+- 制限アプリの一覧から外したアプリは、その場で一時停止を解除する（止まったまま残さない）。
+
+### 7.3 ぬけみちの防止（F-31）
+
+端末の所有者になったときに、`Hardening` で次の制限をかける。
+
+| 制限 | 目的 |
+|---|---|
+| `DISALLOW_CONFIG_DATE_TIME` ＋ 自動時刻を必須にする | 時計を進めてしめきり・日付をごまかせないようにする |
+| `DISALLOW_INSTALL_APPS` / `DISALLOW_UNINSTALL_APPS` / `setUninstallBlocked(このアプリ)` | このアプリの削除と、制限していない別アプリの追加を防ぐ |
+| `DISALLOW_APPS_CONTROL` | このアプリのデータ消去・強制停止を防ぐ |
+| `DISALLOW_FACTORY_RESET` | 設定アプリからの初期化を防ぐ |
+| `DISALLOW_DEBUGGING_FEATURES` | `adb` で制限をはずせないようにする |
+| `DISALLOW_SAFE_BOOT` | セーフモードでの起動を防ぐ |
+| `DISALLOW_ADD_USER` | 別のユーザーを作って逃げられないようにする |
+
+- アプリの追加は保護者が F-30 の PIN を入れた間だけ一時的に許可する（Play ストアから入れたいとき）。
+- 保護者 PIN はハッシュ（ソルト付き PBKDF2）で保存し、平文では持たない。5回まちがえたら1分待たせる。
+
+### 7.4 保護者の設定手順（アプリ内とREADMEで案内する）
+
+1. タブレットを初期化し、最初の設定では **Google アカウントを追加しない**（アカウントがあると端末の所有者にできない）
+2. 開発者向けオプションで USB デバッグをオンにし、PC から APK を入れる
+3. PC で `adb shell dpm set-device-owner <パッケージ>/.lock.AdminReceiver` を実行する
+4. アプリを開いて保護者 PIN を決め、制限アプリを選ぶ（このとき F-31 の制限がかかり、USB デバッグも使えなくなる）
+5. 必要なら Google アカウントを追加する
+
+- 端末の所有者の解除は、せってい画面で PIN を入れて行う（`clearDeviceOwnerApp`。F-31 の制限と一時停止もすべて元に戻す）。
+
+### 7.5 データ
+
+- 保存形式は Web 版のデータモデル（3章）と同じ JSON を、アプリ専用領域のファイル `kids-task-app-v1.json` に保存する。形式を合わせておき、将来の取り込み（Q20）に備える。
+- Android 版だけのデータ（制限アプリの一覧・PIN ハッシュ・一時かいほうの終わりの時刻）は別ファイル `lock-settings.json` に分ける。
+- 保存は一時ファイルに書いてから置きかえる（書き込み途中で電源が切れても壊れないように）。壊れていたときの扱いは 6 章と同じ。
